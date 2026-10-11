@@ -28,9 +28,12 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+use co3::{ReprC, rust_spec::RustSpec};
+
 #[repr(C)]
-#[derive(Clone, Copy)]
-struct Op {
+#[derive(Clone, Copy, ReprC, RustSpec)]
+#[doc(hidden)]
+pub struct Op {
     op_type: u8,
     size: u8,
     reg: u8,
@@ -303,14 +306,23 @@ impl core::fmt::Display for Error {
     }
 }
 
-unsafe extern "C" {
-    fn fd_decode(buf: *const u8, len: usize, mode: i32, _: usize, out_instr: *mut Instr) -> i32;
-    fn fd_format_abs(instr: *const Instr, addr: u64, buf: *mut u8, len: usize) -> u32;
-    fn fd_effects(instr: *const Instr) -> u64;
+co3::ffi! {
+    #![unsafe(extern("C"))]
+
+    // Keep these declarations raw: fd_decode writes into uninitialized storage,
+    // and the existing pointer contracts remain the caller's responsibility.
+    #[symbol_name = "fd_decode"]
+    raw fn fd_decode(buf: *const u8, len: usize, mode: i32, address: usize, out_instr: *mut Instr) -> i32;
+
+    #[symbol_name = "fd_format_abs"]
+    raw fn fd_format_abs(instr: *const Instr, addr: u64, buf: *mut u8, len: usize) -> u32;
+
+    #[symbol_name = "fd_effects"]
+    raw fn fd_effects(instr: *const Instr) -> u64;
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, ReprC, RustSpec)]
 pub struct Instr {
     instr_type: u16,
     flags: u8,
