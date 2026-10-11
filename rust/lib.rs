@@ -319,14 +319,16 @@ impl core::fmt::Display for Error {
 co3::ffi! {
     #![unsafe(extern("C"))]
 
-    #[symbol_name = "fd_decode"]
-    fn fd_decode(#[unpack(_, _)] buf: &[u8], mode: Mode, address: DecodeAddress, out_instr: &mut MaybeUninit<Instr>) -> i32;
+    impl Instr {
+        #[symbol_name = "fd_decode"]
+        fn decode_ffi(#[unpack(_, _)] buf: &[u8], mode: Mode, address: DecodeAddress, out_instr: &mut MaybeUninit<Self>) -> i32;
 
-    #[symbol_name = "fd_format_abs"]
-    fn fd_format_abs(instr: &Instr, addr: u64, #[unpack(_, _)] buf: &mut [u8]) -> u32;
+        #[symbol_name = "fd_format_abs"]
+        fn format_abs_ffi(&self, addr: u64, #[unpack(_, _)] buf: &mut [u8]) -> u32;
 
-    #[symbol_name = "fd_effects"]
-    fn fd_effects(instr: &Instr) -> u64;
+        #[symbol_name = "fd_effects"]
+        fn effects_ffi(&self) -> u64;
+    }
 }
 
 #[repr(C)]
@@ -349,7 +351,7 @@ impl Instr {
     /// Decode an instruction into uninitialized storage. Compared to
     /// [`Instr::decode()`], this avoids copying the decoded instruction.
     pub fn decode_into(buf: &[u8], mode: Mode, out: &mut MaybeUninit<Instr>) -> Result<(), Error> {
-        let res = fd_decode(buf, mode, DecodeAddress::UNSPECIFIED, out);
+        let res = Self::decode_ffi(buf, mode, DecodeAddress::UNSPECIFIED, out);
         match res {
             x if x >= 0 => Ok(()),
             -1 => Err(Error::Undefined),
@@ -389,7 +391,7 @@ impl Instr {
     /// - Status flag effects individually as documented, but typically, ZAPS
     ///   flags are renamed together (or, on Atom, all status flags).
     pub fn effects(&self) -> Effects {
-        Effects(fd_effects(self))
+        Effects(self.effects_ffi())
     }
 
     /// Gets the type/mnemonic of the instruction.
@@ -567,7 +569,7 @@ impl Instr {
     /// Format an instruction into a buffer. Returns the required number of
     /// bytes, excluding the null terminator. A short buffer is truncated.
     pub fn format_into(&self, addr: u64, buf: &mut [u8]) -> usize {
-        fd_format_abs(self, addr, buf) as usize - 1
+        self.format_abs_ffi(addr, buf) as usize - 1
     }
 
     /// Format an instruction to a string.
