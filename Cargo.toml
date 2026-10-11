@@ -13,7 +13,7 @@ build = "rust/build.rs"
 path = "rust/lib.rs"
 
 [dependencies]
-co3 = { version = "=0.7.2", default-features = false, features = ["derive"] }
+co3 = { version = "0.7.3", default-features = false, features = ["derive"] }
 
 [build-dependencies]
 cmake = "0.1"
