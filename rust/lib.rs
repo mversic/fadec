@@ -29,6 +29,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use co3::{ReprC, rust_spec::RustSpec};
+use core::mem::MaybeUninit;
 
 #[repr(C)]
 #[derive(Clone, Copy, ReprC, RustSpec)]
@@ -309,16 +310,14 @@ impl core::fmt::Display for Error {
 co3::ffi! {
     #![unsafe(extern("C"))]
 
-    // Keep these declarations raw: fd_decode writes into uninitialized storage,
-    // and the existing pointer contracts remain the caller's responsibility.
     #[symbol_name = "fd_decode"]
-    raw fn fd_decode(buf: *const u8, len: usize, mode: i32, address: usize, out_instr: *mut Instr) -> i32;
+    fn fd_decode(#[unpack(_, _)] buf: &[u8], mode: i32, address: usize, out_instr: &mut MaybeUninit<Instr>) -> i32;
 
     #[symbol_name = "fd_format_abs"]
-    raw fn fd_format_abs(instr: *const Instr, addr: u64, buf: *mut u8, len: usize) -> u32;
+    fn fd_format_abs(instr: &Instr, addr: u64, #[unpack(_, _)] buf: &mut [u8]) -> u32;
 
     #[symbol_name = "fd_effects"]
-    raw fn fd_effects(instr: *const Instr) -> u64;
+    fn fd_effects(instr: &Instr) -> u64;
 }
 
 #[repr(C)]
@@ -338,14 +337,10 @@ pub struct Instr {
 }
 
 impl Instr {
-    /// Decode an instruction into an (uninitialized) location. mode specifies
-    /// decoding mode as 32 or 64. The return value is the size of the decoded
-    /// instruction in bytes. Compared to [`Instr::decode()`], this avoids
-    /// copying the Instr struct (which is somewhat expensive to copy
-    /// immediately after decoding as copying inhibits store-to-load
-    /// forwarding from the bytewise-written struct).
-    pub unsafe fn decode_into(buf: &[u8], mode: Mode, out: *mut Instr) -> Result<(), Error> {
-        let res = unsafe { fd_decode(buf.as_ptr(), buf.len(), mode as i32, 0, out) };
+    /// Decode an instruction into uninitialized storage. Compared to
+    /// [`Instr::decode()`], this avoids copying the decoded instruction.
+    pub fn decode_into(buf: &[u8], mode: Mode, out: &mut MaybeUninit<Instr>) -> Result<(), Error> {
+        let res = fd_decode(buf, mode as i32, 0, out);
         match res {
             x if x >= 0 => Ok(()),
             -1 => Err(Error::Undefined),
@@ -358,8 +353,9 @@ impl Instr {
 
     /// Decode an instruction. mode specifies decoding mode as 32 or 64.
     pub fn decode(buf: &[u8], mode: Mode) -> Result<Instr, Error> {
-        let mut instr = core::mem::MaybeUninit::<Instr>::uninit();
-        unsafe { Self::decode_into(buf, mode, instr.as_mut_ptr()).map(|_| instr.assume_init()) }
+        let mut instr = MaybeUninit::<Instr>::uninit();
+        Self::decode_into(buf, mode, &mut instr)?;
+        Ok(unsafe { instr.assume_init() })
     }
 
     /// Approximate instruction effects as a combination of FdEffect items.
@@ -384,7 +380,7 @@ impl Instr {
     /// - Status flag effects individually as documented, but typically, ZAPS
     ///   flags are renamed together (or, on Atom, all status flags).
     pub fn effects(&self) -> Effects {
-        unsafe { Effects(fd_effects(self)) }
+        Effects(fd_effects(self))
     }
 
     /// Gets the type/mnemonic of the instruction.
@@ -559,12 +555,10 @@ impl Instr {
         unsafe { core::mem::transmute::<u8, RoundControl>((self.evex & 0x70) >> 4) }
     }
 
-    /// Format instruction into a buffer. The buffer should have a capacity of
-    /// at least 128 bytes. Returns the number of written bytes, if that number
-    /// is smaller than the capacity, or the number of required bytes, in which
-    /// case all bytes were written.
-    pub unsafe fn format_into(&self, addr: u64, buf: *mut u8, cap: usize) -> usize {
-        unsafe { fd_format_abs(self, addr, buf, cap) as usize - 1 }
+    /// Format an instruction into a buffer. Returns the required number of
+    /// bytes, excluding the null terminator. A short buffer is truncated.
+    pub fn format_into(&self, addr: u64, buf: &mut [u8]) -> usize {
+        fd_format_abs(self, addr, buf) as usize - 1
     }
 
     /// Format an instruction to a string.
@@ -576,25 +570,22 @@ impl Instr {
     /// Format an instruction to a string, relative to a non-zero base address.
     #[cfg(feature = "std")]
     pub fn format_abs(&self, addr: u64) -> String {
-        let mut buf = Vec::<u8>::with_capacity(128);
-        unsafe {
-            let str_len = self.format_into(addr, buf.as_mut_ptr(), buf.capacity());
-            buf.set_len(str_len);
-            String::from_utf8_unchecked(buf)
+        let mut buf = vec![0; 128];
+        let mut len = self.format_into(addr, &mut buf);
+        if len >= buf.len() {
+            buf.resize(len + 1, 0);
+            len = self.format_into(addr, &mut buf);
         }
+        String::from_utf8_lossy(&buf[..len]).into_owned()
     }
 }
 
 impl core::fmt::Display for Instr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); 128];
-        let len = unsafe { self.format_into(0, buf.as_mut_ptr() as *mut u8, buf.len()) };
-        debug_assert!(len < buf.len());
-        buf.iter_mut().take(len).for_each(|b| unsafe {
-            b.assume_init_mut();
-        });
-        let formatted = unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
-        f.write_str(unsafe { core::str::from_utf8_unchecked(formatted) })
+        let mut buf = [0_u8; 128];
+        let len = self.format_into(0, &mut buf);
+        let formatted = buf.get(..len).ok_or(core::fmt::Error)?;
+        f.write_str(core::str::from_utf8(formatted).map_err(|_| core::fmt::Error)?)
     }
 }
 
@@ -611,6 +602,19 @@ impl core::fmt::Debug for Instr {
 #[rustfmt::skip]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_ffi_buffers() {
+        let mut output = MaybeUninit::<Instr>::uninit();
+        Instr::decode_into(&[0x90], Mode::X86_64, &mut output).unwrap();
+        let instr = unsafe { output.assume_init() };
+        assert_eq!(instr.size(), 1);
+
+        let mut short = [0_u8; 2];
+        assert_eq!(instr.format_into(0, &mut short), 3);
+        assert_eq!(short, *b"n\0");
+        assert_eq!(instr.format_into(0, &mut []), 3);
+    }
 
     #[test]
     fn errors() {
