@@ -186,13 +186,22 @@ impl TryFrom<u8> for Reg {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ReprC, RustSpec)]
+#[repr(i32)]
 pub enum Mode {
     /// Decode for 32-bit mode (CS.L=0, CS.D=1).
     X86_32 = 32,
     /// Decode for 64-bit mode (CS.L=1).
     X86_64 = 64,
+}
+
+#[derive(Clone, Copy, ReprC, RustSpec)]
+#[repr(transparent)]
+#[repr_c(identity)]
+struct DecodeAddress(usize);
+
+impl DecodeAddress {
+    const UNSPECIFIED: Self = Self(0);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -311,7 +320,7 @@ co3::ffi! {
     #![unsafe(extern("C"))]
 
     #[symbol_name = "fd_decode"]
-    fn fd_decode(#[unpack(_, _)] buf: &[u8], mode: i32, address: usize, out_instr: &mut MaybeUninit<Instr>) -> i32;
+    fn fd_decode(#[unpack(_, _)] buf: &[u8], mode: Mode, address: DecodeAddress, out_instr: &mut MaybeUninit<Instr>) -> i32;
 
     #[symbol_name = "fd_format_abs"]
     fn fd_format_abs(instr: &Instr, addr: u64, #[unpack(_, _)] buf: &mut [u8]) -> u32;
@@ -340,7 +349,7 @@ impl Instr {
     /// Decode an instruction into uninitialized storage. Compared to
     /// [`Instr::decode()`], this avoids copying the decoded instruction.
     pub fn decode_into(buf: &[u8], mode: Mode, out: &mut MaybeUninit<Instr>) -> Result<(), Error> {
-        let res = fd_decode(buf, mode as i32, 0, out);
+        let res = fd_decode(buf, mode, DecodeAddress::UNSPECIFIED, out);
         match res {
             x if x >= 0 => Ok(()),
             -1 => Err(Error::Undefined),
